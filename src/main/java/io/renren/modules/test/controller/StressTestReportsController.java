@@ -19,6 +19,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
 
@@ -104,12 +105,12 @@ public class StressTestReportsController {
             StressTestReportsEntity stressTestReport = stressTestReportsService.queryObject(reportId);
 
             //首先判断，如果file_size为0或者空，说明没有结果文件，直接报错打断。
-            if (stressTestReport.getFileSize() == 0L || stressTestReport.getFileSize() == null) {
-                throw new RRException("找不到测试结果文件，无法生成测试报告！");
-            }
+//            if (stressTestReport.getFileSize() == 0L || stressTestReport.getFileSize() == null) {
+//                throw new RRException("找不到测试结果文件，无法生成测试报告！");
+//            }
             //如果测试报告文件目录已经存在，说明生成过测试报告，直接打断
-            if (StressTestUtils.RUN_SUCCESS.equals(stressTestReport.getStatus())) {
-                throw new RRException("已经存在测试报告不要重复创建！");
+            if (StressTestUtils.RUNNING.equals(stressTestReport.getStatus())) {
+                throw new RRException("请等待测试报告生成结束！");
             }
             stressTestReportsService.createReport(stressTestReport);
         }
@@ -129,8 +130,9 @@ public class StressTestReportsController {
 
         HttpHeaders headers = new HttpHeaders();
         headers.add("Cache-Control", "no-cache,no-store,must-revalidate");
+        String fileNameUTF8 = new String(reportsEntity.getOriginName().getBytes(), StandardCharsets.ISO_8859_1);
         headers.add("Content-Disposition",
-                "attachment;filename=" + reportsEntity.getOriginName() + ".zip");
+                "attachment;filename=" + fileNameUTF8 + ".zip");
         headers.add("Pragma", "no-cache");
         headers.add("Expires", "0");
         headers.setContentType(MediaType.parseMediaType("application/octet-stream"));

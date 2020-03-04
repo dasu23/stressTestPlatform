@@ -1,14 +1,16 @@
 package io.renren.modules.test.utils;
 
+import com.google.common.cache.Cache;
+import com.google.common.cache.CacheBuilder;
 import io.renren.common.exception.RRException;
 import io.renren.common.utils.SpringContextUtils;
 import io.renren.modules.sys.service.SysConfigService;
 import io.renren.modules.test.jmeter.JmeterRunEntity;
+import io.renren.modules.test.jmeter.calculator.LocalSamplingStatCalculator;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.apache.commons.io.FileUtils;
 import org.apache.commons.io.IOUtils;
 import org.apache.jmeter.util.JMeterUtils;
-import org.apache.jmeter.visualizers.SamplingStatCalculator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -16,17 +18,17 @@ import org.springframework.web.multipart.MultipartFile;
 
 import java.io.File;
 import java.io.FileInputStream;
-import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Properties;
+import java.util.concurrent.TimeUnit;
 
 import static io.renren.common.utils.ConfigConstant.OS_NAME_LC;
 
 /**
  * 性能测试的工具类，同时用于读取配置文件。
- * 也可以将性能测试参数配置到系统参数配置中去。
+ * 配置文件在数据库中配置
  */
 //@ConfigurationProperties(prefix = "test.stress")
 @Component
@@ -42,6 +44,7 @@ public class StressTestUtils {
     public static final Integer RUNNING = 1;
     public static final Integer RUN_SUCCESS = 2;
     public static final Integer RUN_ERROR = 3;
+    public static final Integer NO_FILE = 4;
 
     /**
      * 是否需要测试报告的状态标识
@@ -64,35 +67,41 @@ public class StressTestUtils {
     public static final Integer NO_NEED_DEBUG = 0;
     public static final Integer NEED_DEBUG = 1;
 
-    //0：禁用  1：启用
+    //0：禁用  1：启用  2：进行中
     public static final Integer DISABLE = 0;
     public static final Integer ENABLE = 1;
+    public static final Integer PROGRESSING = 2;
 
     /**
      * 针对每一个fileId，存储一份
      * 用于存储每一个用例的计算结果集合。
+     * 使用google的缓存技术，让这部分全局数据多一份时间控制保障。
      */
-    public static Map<Long, Map<String, SamplingStatCalculator>> samplingStatCalculator4File = new HashMap<>();
+    public static Cache<Long, Map<String, LocalSamplingStatCalculator>> samplingStatCalculator4File =
+//            new HashMap<>();
+     CacheBuilder.newBuilder()
+            .maximumSize(5000) // 设置缓存的最大容量
+            .expireAfterAccess(30, TimeUnit.MINUTES) // 设置缓存在写入一分钟后失效
+            .concurrencyLevel(20) // 设置并发级别为10
+//            .recordStats() // 开启缓存统计
+            .build();
 
     /**
      * 针对每一个fileId，存储一份Jmeter的Engines，用于指定的用例启动和停止。
      * 如果不使用分布式节点，则Engines仅包含master主节点。
      * 默认是使用分布式的，则Engines会包含所有有效的分布式节点的Engine。
      */
-    public static Map<Long, JmeterRunEntity> jMeterEntity4file = new HashMap<>();
+    public static Map<Long, JmeterRunEntity> jMeterEntity4file = new HashMap();
 
     /**
      * 主进程Master内保存的一些状态，主要用于分布式的压测操作服务。
      */
-    public static Map<String, String> jMeterStatuses = new HashMap<>();
-
-//    private static String jmeterHome;
-
-//    private String casePath;
-
-//    private boolean useJmeterScript;
-
-//    private boolean replaceFile = true;
+    public static Cache<String, String> jMeterStatuses = CacheBuilder.newBuilder()
+            .maximumSize(5000) // 设置缓存的最大容量
+            .expireAfterAccess(30, TimeUnit.MINUTES) // 设置缓存在写入一分钟后失效
+            .concurrencyLevel(20) // 设置并发级别为10
+//            .recordStats() // 开启缓存统计
+            .build();
 
     /**
      * Jmeter在Master节点的绝对路径
@@ -128,6 +137,13 @@ public class StressTestUtils {
      */
     public final static String MASTER_JMETER_REPLACE_FILE_KEY = "MASTER_JMETER_REPLACE_FILE_KEY";
 
+    /**
+     * 脚本的默认最长定时执行时间，是否开启，默认是为true，开启。
+     * 具体的执行时间，由脚本文件字段来配置。单位是秒，对应的是Jmeter脚本的duration字段。
+     * 该功能添加的原因是应对脚本执行，但是忘记了关闭的情况，这样会导致浪费系统资源，尤其是线上操作尤其危险。
+     */
+    public final static String SCRIPT_SCHEDULER_DURATION_KEY = "SCRIPT_SCHEDULER_DURATION_KEY";
+
     public static String getJmeterHome() {
         return sysConfigService.getValue(MASTER_JMETER_HOME_KEY);
     }
@@ -137,15 +153,19 @@ public class StressTestUtils {
     }
 
     public boolean isUseJmeterScript() {
-        return Boolean.valueOf(sysConfigService.getValue(MASTER_JMETER_USE_SCRIPT_KEY));
+        return Boolean.parseBoolean(sysConfigService.getValue(MASTER_JMETER_USE_SCRIPT_KEY));
     }
 
     public boolean isReplaceFile() {
-        return Boolean.valueOf(sysConfigService.getValue(MASTER_JMETER_REPLACE_FILE_KEY));
+        return Boolean.parseBoolean(sysConfigService.getValue(MASTER_JMETER_REPLACE_FILE_KEY));
     }
 
     public boolean isMasterGenerateReport() {
-        return Boolean.valueOf(sysConfigService.getValue(MASTER_JMETER_GENERATE_REPORT_KEY));
+        return Boolean.parseBoolean(sysConfigService.getValue(MASTER_JMETER_GENERATE_REPORT_KEY));
+    }
+
+    public boolean isScriptSchedulerDurationEffect() {
+        return Boolean.parseBoolean(sysConfigService.getValue(SCRIPT_SCHEDULER_DURATION_KEY));
     }
 
     public static String getSuffix4() {
@@ -324,16 +344,18 @@ public class StressTestUtils {
      * 如果删除的测试报告是测试脚本唯一的测试报告，则将目录也一并删除。
      */
     public void deleteJmxDir(String reportPath) {
+        String jmxDir = reportPath.substring(0, reportPath.lastIndexOf(File.separator));
+        File jmxDirFile = new File(jmxDir);
+        if (jmxDirFile.exists() && FileUtils.sizeOf(jmxDirFile) == 0L) {
+            FileUtils.deleteQuietly(jmxDirFile);
+        }
+    }
+
+    public void pause(long ms) {
         try {
-            String jmxDir = reportPath.substring(0, reportPath.lastIndexOf(File.separator));
-            File jmxDirFile = new File(jmxDir);
-            if (FileUtils.sizeOf(jmxDirFile) == 0L) {
-                FileUtils.forceDelete(jmxDirFile);
-            }
-        } catch (FileNotFoundException | IllegalArgumentException e) {
-            logger.error("要删除的测试报告上级文件夹找不到(删除成功)  " + e.getMessage());
-        } catch (IOException e) {
-            throw new RRException("删除测试报告上级文件夹异常失败", e);
+            TimeUnit.MILLISECONDS.sleep(ms);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
         }
     }
 }
